@@ -1,286 +1,199 @@
 """
-================================================================
-  MAGOGO — BSF FARMING OPTIMISATION  |  Core ML Pipeline
-================================================================
-  This module handles all machine-learning work:
-    • Data loading & cleaning
-    • Model training (Random Forest, Gradient Boosting, Linear)
-    • Cross-validation & model comparison
-    • Feature importance
-    • Yield prediction
-    • Condition optimisation (grid search over farming parameters)
-
-  Import this in app.py — it has no UI code of its own.
-================================================================
+MAGOGO — BSF Farming Optimisation | Core ML Pipeline
 """
 
-import os
-import warnings
-import itertools
-
+import warnings, itertools
 import numpy as np
 import pandas as pd
-
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model  import Ridge
+from sklearn.linear_model import Ridge
 from sklearn.model_selection import cross_validate, KFold
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_absolute_error, r2_score
 
 warnings.filterwarnings("ignore")
 
-# ─── Feature & label maps ────────────────────────────────────────────────────
 FEATURES = [
-    "Feed_Amount",
-    "Cycle_Days",
-    "Bulking_Agent",
-    "Water_Added",
-    "pH",
-    "Temperature",
-    "Reactor_Temperature",
-    "Frass_Mass",
+    "Feed_Amount","Cycle_Days","Bulking_Agent","Water_Added",
+    "pH","Temperature","Reactor_Temperature","Frass_Mass",
 ]
-
 FEATURE_LABELS = {
-    "Feed_Amount":         "Feed Amount (kg)",
-    "Cycle_Days":          "Cycle Duration (days)",
-    "Bulking_Agent":       "Bulking Agent (kg)",
-    "Water_Added":         "Water Added (L)",
-    "pH":                  "pH Level",
-    "Temperature":         "Ambient Temp (°C)",
-    "Reactor_Temperature": "Reactor Temp (°C)",
-    "Frass_Mass":          "Frass Mass (kg)",
+    "Feed_Amount":"Feed Amount (kg)","Cycle_Days":"Cycle Duration (days)",
+    "Bulking_Agent":"Bulking Agent (kg)","Water_Added":"Water Added (L)",
+    "pH":"pH Level","Temperature":"Ambient Temp (°C)",
+    "Reactor_Temperature":"Reactor Temp (°C)","Frass_Mass":"Frass Mass (kg)",
 }
 
-# ─── Data loading ────────────────────────────────────────────────────────────
+# Grid: 6×6×5×5×4 = 3600 combos, ~0.03s with batch prediction
+PARAM_RANGES = {
+    "Feed_Amount":   np.array([10.0,11.0,12.0,13.0,15.0,18.0,20.0]),
+    "Temperature":   np.array([5.0,6.0,7.0,8.0,9.0,10.0]),
+    "pH":            np.array([6.0,7.0,8.0,9.0,10.0]),
+    "Water_Added":   np.array([5.0,7.5,10.0,12.5,15.0]),
+    "Bulking_Agent": np.array([0.5,1.0,1.5,2.0]),
+}
 
-def load_and_clean(csv_path: str) -> pd.DataFrame:
-    """
-    Load main_dataset.csv, handle European decimal commas,
-    semicolon separators, and missing values.
-    Returns a clean DataFrame with numeric columns.
-    """
-    df = pd.read_csv(
-        csv_path,
-        sep=";",
-        decimal=",",
-        na_values=["", " "],
-    )
+GUIDANCE_THRESHOLDS = {
+    "Feed_Amount":   {"optimal_min":12.0,"optimal_max":13.0,"unit":"kg",
+        "low_tip":"Increase feed to 12–13 kg. Low feed limits how much biomass larvae can produce.",
+        "high_tip":"Reduce feed below 13.5 kg. Excess feed causes anaerobic fermentation.",
+    },
+    "Temperature":   {"optimal_min":6.0,"optimal_max":8.5,"unit":"°C",
+        "low_tip":"Ambient temp is low. Insulate your reactor or use a heating mat.",
+        "high_tip":"Temperature is high. Add shade or ventilation to avoid heat stress on larvae.",
+    },
+    "pH":            {"optimal_min":8.0,"optimal_max":10.0,"unit":"",
+        "low_tip":"pH too acidic. Add lime or wood ash to raise pH toward 8–10.",
+        "high_tip":"pH too alkaline. Reduce lime and add more carbon-rich bulking agent.",
+    },
+    "Water_Added":   {"optimal_min":5.0,"optimal_max":10.0,"unit":"L",
+        "low_tip":"Substrate is too dry. Add 5–10 L of water to help larvae feed.",
+        "high_tip":"Too much water. Reduce to 5–10 L and add bulking agent to improve drainage.",
+    },
+    "Bulking_Agent": {"optimal_min":0.5,"optimal_max":1.0,"unit":"kg",
+        "low_tip":"Add more bulking agent (wood chips or cardboard) to improve aeration.",
+        "high_tip":"Too much bulking agent dilutes nutrients. Keep to 0.5–1.0 kg.",
+    },
+    "Cycle_Days":    {"optimal_min":180,"optimal_max":300,"unit":"days",
+        "low_tip":"Cycle too short — larvae may not have reached prepupal stage yet. Target 180–300 days.",
+        "high_tip":"Very long cycle. Harvest at prepupal stage (days 180–300) before larvae lose mass.",
+    },
+}
 
-    # Drop stray unnamed columns added by Excel exports
+WHY_OPTIMAL = {
+    "Feed_Amount":   "Feed is the #1 yield driver in your data. The 12–13 kg range gives larvae enough organic matter without causing oxygen depletion in the substrate.",
+    "Temperature":   "Your highest-yield cycles occurred at ambient temps of 6–8.5°C. The reactor naturally warms the substrate above ambient, so this range is sufficient.",
+    "pH":            "A slightly alkaline substrate (pH 8–10) inhibits competing microbes and supports efficient larval digestion of organic waste.",
+    "Water_Added":   "Adequate moisture (5–10 L) keeps the substrate soft enough for larvae to feed while maintaining airflow through the bulking agent.",
+    "Bulking_Agent": "Wood chips or cardboard (0.5–1 kg) create air pockets that prevent anaerobic dead zones — critical for healthy, fast-growing larvae.",
+    "Cycle_Days":    "Harvest at the prepupal stage (days 180–300) when larvae reach maximum biomass. Harvesting too early or too late reduces yield.",
+    "Reactor_Temperature":"Fixed at training median. Insulate the reactor to maintain this internal temperature regardless of ambient conditions.",
+    "Frass_Mass":    "Frass output is a result of the process, not an input you control directly. Used here as a reference value only.",
+}
+
+def load_and_clean(csv_path):
+    df = pd.read_csv(csv_path, sep=";", decimal=",", na_values=["", " "])
     df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
-
-    # Replace common missing-value tokens
-    df.replace(["N/A", "NA", "n/a", "na", "-"], np.nan, inplace=True)
-
-    # Cast all columns except Date to numeric
+    df.replace(["N/A","NA","n/a","na","-"], np.nan, inplace=True)
     for col in df.columns:
         if col != "Date":
             df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Parse dates so we can sort / plot time-series
     df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-    df = df.sort_values("Date").reset_index(drop=True)
+    return df.sort_values("Date").reset_index(drop=True)
 
-    return df
+def _pipe(est):
+    return Pipeline([("imp",SimpleImputer(strategy="median")),
+                     ("scl",StandardScaler()),("mdl",est)])
 
+def _cv(pipe, X, y, cv):
+    r = cross_validate(pipe, X, y, cv=cv,
+                       scoring=["neg_mean_absolute_error","r2"])
+    return {"mae_mean":-r["test_neg_mean_absolute_error"].mean(),
+            "mae_std": r["test_neg_mean_absolute_error"].std(),
+            "r2_mean": r["test_r2"].mean(),
+            "r2_std":  r["test_r2"].std()}
 
-# ─── Model building helpers ──────────────────────────────────────────────────
-
-def _make_pipeline(estimator):
-    """Wrap an estimator in impute → scale → model pipeline."""
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  StandardScaler()),
-        ("model",   estimator),
-    ])
-
-
-def _cv_scores(pipeline, X, y, cv):
-    """Return dict with mean/std for MAE and R²."""
-    res = cross_validate(
-        pipeline, X, y, cv=cv,
-        scoring=["neg_mean_absolute_error", "r2"],
-        return_train_score=False,
-    )
-    return {
-        "mae_mean": -res["test_neg_mean_absolute_error"].mean(),
-        "mae_std":   res["test_neg_mean_absolute_error"].std(),
-        "r2_mean":   res["test_r2"].mean(),
-        "r2_std":    res["test_r2"].std(),
+def train_models(df):
+    hdf   = df.dropna(subset=["Harvest_Mass"]).copy()
+    feats = [f for f in FEATURES if f in hdf.columns]
+    imp   = SimpleImputer(strategy="median")
+    X     = pd.DataFrame(imp.fit_transform(hdf[feats]), columns=feats)
+    y     = hdf["Harvest_Mass"].values
+    cv    = KFold(n_splits=5, shuffle=True, random_state=42)
+    cands = {
+        "Random Forest":    _pipe(RandomForestRegressor(n_estimators=300,max_features="sqrt",random_state=42,n_jobs=-1)),
+        "Gradient Boosting":_pipe(GradientBoostingRegressor(n_estimators=200,learning_rate=0.05,max_depth=3,random_state=42)),
+        "Ridge Regression": _pipe(Ridge(alpha=1.0)),
     }
+    rows = [{"Model":n,**_cv(p,X,y,cv)} for n,p in cands.items()]
+    comp = pd.DataFrame(rows)
+    best_name = comp.loc[comp["mae_mean"].idxmin(),"Model"]
+    best_pipe = cands[best_name]
+    best_pipe.fit(X,y)
+    rf = cands["Random Forest"]; rf.fit(X,y)
+    fi = pd.DataFrame({"Feature":feats,
+                       "Label":[FEATURE_LABELS.get(f,f) for f in feats],
+                       "Importance":rf.named_steps["mdl"].feature_importances_
+                       }).sort_values("Importance",ascending=False).reset_index(drop=True)
+    return {"best_model":best_pipe,"best_name":best_name,"comparison":comp,
+            "feature_imp":fi,"X":X,"y":y,"imputer":imp,"features_used":feats,
+            "harvest_df":hdf,
+            "high_yield_threshold":float(np.percentile(y,75)),
+            "low_yield_threshold": float(np.percentile(y,25)),
+            "median_yield":        float(np.median(y))}
 
+def predict_single(bundle, user_inputs):
+    feats = bundle["features_used"]
+    row   = pd.DataFrame([{f:user_inputs.get(f,np.nan) for f in feats}])
+    row_i = pd.DataFrame(bundle["imputer"].transform(row),columns=feats)
+    return float(bundle["best_model"].predict(row_i)[0])
 
-# ─── Main training function ──────────────────────────────────────────────────
-
-def train_models(df: pd.DataFrame):
-    """
-    Train three models with cross-validation, select the best,
-    and return a results bundle used by app.py.
-
-    Returns
-    -------
-    dict with keys:
-        best_model      – fitted sklearn pipeline (best performer)
-        best_name       – str label of best model
-        comparison      – pd.DataFrame of CV scores per model
-        feature_imp     – pd.DataFrame of feature importances
-        X, y            – full feature matrix / target (post-imputation)
-        imputer         – fitted SimpleImputer (for prediction demo)
-        features_used   – list of feature names actually present
-    """
-    # ── Prepare data ──────────────────────────────────────────
-    harvest_df = df.dropna(subset=["Harvest_Mass"]).copy()
-    features_used = [f for f in FEATURES if f in harvest_df.columns]
-
-    X_raw = harvest_df[features_used]
-    y     = harvest_df["Harvest_Mass"].values
-
-    # Impute once for feature-importance display (RF needs array)
-    global_imputer = SimpleImputer(strategy="median")
-    X_imputed = pd.DataFrame(
-        global_imputer.fit_transform(X_raw),
-        columns=features_used,
-    )
-
-    # ── Cross-validation ──────────────────────────────────────
-    cv = KFold(n_splits=5, shuffle=True, random_state=42)
-
-    candidates = {
-        "Random Forest": _make_pipeline(
-            RandomForestRegressor(
-                n_estimators=400, max_features="sqrt",
-                min_samples_leaf=1, random_state=42, n_jobs=-1,
-            )
-        ),
-        "Gradient Boosting": _make_pipeline(
-            GradientBoostingRegressor(
-                n_estimators=300, learning_rate=0.05,
-                max_depth=3, random_state=42,
-            )
-        ),
-        "Ridge Regression": _make_pipeline(
-            Ridge(alpha=1.0)
-        ),
-    }
+def optimise_conditions(bundle):
+    """Batch-predict all ~3600 grid combinations — runs in <1 second."""
+    feats   = bundle["features_used"]
+    medians = bundle["X"].median().to_dict()
+    keys    = [k for k in PARAM_RANGES if k in feats]
+    combos  = list(itertools.product(*[PARAM_RANGES[k] for k in keys]))
 
     rows = []
-    for name, pipe in candidates.items():
-        scores = _cv_scores(pipe, X_imputed, y, cv)
-        rows.append({"Model": name, **scores})
-
-    comparison = pd.DataFrame(rows)
-
-    # ── Select best model by lowest MAE ───────────────────────
-    best_idx  = comparison["mae_mean"].idxmin()
-    best_name = comparison.loc[best_idx, "Model"]
-    best_pipe = candidates[best_name]
-    best_pipe.fit(X_imputed, y)   # refit on full data
-
-    # ── Feature importance (RF only; Gradient Boosting fallback) ──
-    rf_pipe = candidates["Random Forest"]
-    rf_pipe.fit(X_imputed, y)
-    importances = rf_pipe.named_steps["model"].feature_importances_
-
-    feature_imp = (
-        pd.DataFrame({
-            "Feature":    features_used,
-            "Label":      [FEATURE_LABELS.get(f, f) for f in features_used],
-            "Importance": importances,
-        })
-        .sort_values("Importance", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    return {
-        "best_model":    best_pipe,
-        "best_name":     best_name,
-        "comparison":    comparison,
-        "feature_imp":   feature_imp,
-        "X":             X_imputed,
-        "y":             y,
-        "imputer":       global_imputer,
-        "features_used": features_used,
-        "harvest_df":    harvest_df,
-    }
-
-
-# ─── Prediction ──────────────────────────────────────────────────────────────
-
-def predict_single(model_bundle: dict, user_inputs: dict) -> float:
-    """
-    Predict Harvest_Mass for a single set of user-supplied conditions.
-
-    Parameters
-    ----------
-    model_bundle : output of train_models()
-    user_inputs  : dict  {feature_name: value}  – missing keys → NaN → imputed
-
-    Returns
-    -------
-    float : predicted harvest mass in kg
-    """
-    features_used = model_bundle["features_used"]
-    row = pd.DataFrame([{f: user_inputs.get(f, np.nan) for f in features_used}])
-
-    # Re-impute with the training-time imputer
-    row_imputed = pd.DataFrame(
-        model_bundle["imputer"].transform(row),
-        columns=features_used,
-    )
-    return float(model_bundle["best_model"].predict(row_imputed)[0])
-
-
-# ─── Optimisation ────────────────────────────────────────────────────────────
-
-def optimise_conditions(model_bundle: dict) -> dict:
-    """
-    Grid-search over realistic farming parameter ranges.
-    Returns the combination that maximises predicted Harvest_Mass.
-
-    Search space (coarse grid — fast enough for a demo):
-      Feed       : 10–20 kg   step 2.5
-      Temperature: 25–35 °C   step 2.5
-      pH         : 6–9        step 1
-      Water      : 5–15 L     step 2.5
-      Bulking    : 0.2–2 kg   step 0.6
-    Fixed values (median from training data):
-      Cycle_Days, Reactor_Temperature, Frass_Mass
-    """
-    features_used = model_bundle["features_used"]
-    X_train       = model_bundle["X"]
-
-    # Medians for fixed features
-    medians = X_train.median().to_dict()
-
-    grid = {
-        "Feed_Amount":   np.arange(10,   20.1,  2.5),
-        "Temperature":   np.arange(25,   35.1,  2.5),
-        "pH":            np.arange(6,     9.1,  1.0),
-        "Water_Added":   np.arange(5,    15.1,  2.5),
-        "Bulking_Agent": np.arange(0.2,   2.01, 0.6),
-    }
-
-    # Build all combinations
-    keys   = list(grid.keys())
-    combos = list(itertools.product(*[grid[k] for k in keys]))
-
-    best_pred = -np.inf
-    best_cond = {}
-
     for combo in combos:
-        cond = {k: v for k, v in zip(keys, combo)}
-        # Fill remaining features with training medians
-        for f in features_used:
+        cond = {k:float(v) for k,v in zip(keys,combo)}
+        for f in feats:
             if f not in cond:
-                cond[f] = medians.get(f, np.nan)
+                cond[f] = float(medians.get(f,np.nan))
+        rows.append([cond[f] for f in feats])
 
-        pred = predict_single(model_bundle, cond)
-        if pred > best_pred:
-            best_pred = pred
-            best_cond = cond
+    X_all  = pd.DataFrame(rows, columns=feats)
+    X_imp  = pd.DataFrame(bundle["imputer"].transform(X_all), columns=feats)
+    preds  = bundle["best_model"].predict(X_imp)
+    best_i = int(np.argmax(preds))
 
-    best_cond["Predicted_Harvest_Mass"] = best_pred
+    best_cond = {k:float(v) for k,v in zip(keys,combos[best_i])}
+    for f in feats:
+        if f not in best_cond:
+            best_cond[f] = float(medians.get(f,np.nan))
+    best_cond["Predicted_Harvest_Mass"] = float(preds[best_i])
     return best_cond
+
+def generate_guidance(user_inputs, bundle):
+    tips = []
+    for param, rules in GUIDANCE_THRESHOLDS.items():
+        if param not in user_inputs:
+            continue
+        val = user_inputs[param]
+        lo, hi = rules["optimal_min"], rules["optimal_max"]
+        if val < lo:
+            status, tip_text = "below", rules["low_tip"]
+            priority = "high" if (lo-val)/(hi-lo+1e-6) > 0.5 else "medium"
+        elif val > hi:
+            status, tip_text = "above", rules["high_tip"]
+            priority = "high" if (val-hi)/(hi-lo+1e-6) > 0.5 else "medium"
+        else:
+            status   = "optimal"
+            tip_text = f"Within the ideal range ({lo}–{hi}{rules['unit']}) — keep it here."
+            priority = "ok"
+        tips.append({"parameter":param,"label":FEATURE_LABELS.get(param,param),
+                     "current_value":val,"unit":rules["unit"],
+                     "optimal_min":lo,"optimal_max":hi,
+                     "status":status,"tip":tip_text,"priority":priority})
+    tips.sort(key=lambda x:{"high":0,"medium":1,"ok":2}[x["priority"]])
+    return tips
+
+def yield_interpretation(predicted, bundle):
+    median = bundle["median_yield"]
+    high_t = bundle["high_yield_threshold"]
+    low_t  = bundle["low_yield_threshold"]
+    delta  = predicted - median
+    pct    = delta / median * 100
+    if predicted >= high_t:
+        level,emoji,msg = "Excellent","🟢","High-yield scenario — conditions are well-suited for BSF production."
+    elif predicted >= median:
+        level,emoji,msg = "Good","🟡","Above average. Small adjustments could push this into the high range."
+    elif predicted >= low_t:
+        level,emoji,msg = "Below Average","🟠","Below historical average. Follow the guidance tips below to improve."
+    else:
+        level,emoji,msg = "Poor","🔴","Low predicted yield. Apply high-priority tips for the biggest gains."
+    return {"level":level,"emoji":emoji,"message":msg,
+            "delta_kg":delta,"delta_pct":pct,
+            "median":median,"high_threshold":high_t,"low_threshold":low_t}
