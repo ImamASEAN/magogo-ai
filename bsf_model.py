@@ -101,33 +101,73 @@ def train_models(df):
     X     = pd.DataFrame(imp.fit_transform(hdf[feats]), columns=feats)
     y     = hdf["Harvest_Mass"].values
     
+    # Feature Engineering: Tambahkan polynomial features dan interaksi
+    from sklearn.preprocessing import PolynomialFeatures
+    from sklearn.compose import ColumnTransformer
+    
+    # Buat fitur tambahan: rasio dan interaksi
+    X_enhanced = X.copy()
+    
+    # Tambahkan rasio Feed/Temperature sebagai fitur baru
+    if "Feed_Amount" in X.columns and "Temperature" in X.columns:
+        X_enhanced["Feed_Temp_Ratio"] = X_enhanced["Feed_Amount"] / (X_enhanced["Temperature"] + 1)
+    
+    # Tambahkan interaksi Feed * Water
+    if "Feed_Amount" in X.columns and "Water_Added" in X.columns:
+        X_enhanced["Feed_Water_Interact"] = X_enhanced["Feed_Amount"] * X_enhanced["Water_Added"]
+    
+    # Tambahkan kuadrat dari fitur penting
+    if "Feed_Amount" in X.columns:
+        X_enhanced["Feed_Squared"] = X_enhanced["Feed_Amount"] ** 2
+    if "Temperature" in X.columns:
+        X_enhanced["Temp_Squared"] = X_enhanced["Temperature"] ** 2
+    
     # Split data untuk evaluasi (80% train, 20% test)
     from sklearn.model_selection import train_test_split
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X_enhanced, y, test_size=0.2, random_state=42)
     
     cv    = KFold(n_splits=5, shuffle=True, random_state=42)
+    
+    # Model candidates dengan hyperparameter yang dioptimalkan
     cands = {
-        "Random Forest":    _pipe(RandomForestRegressor(n_estimators=300,max_features="sqrt",random_state=42,n_jobs=-1)),
-        "Gradient Boosting":_pipe(GradientBoostingRegressor(n_estimators=200,learning_rate=0.05,max_depth=3,random_state=42)),
-        "Ridge Regression": _pipe(Ridge(alpha=1.0)),
+        "Gradient Boosting": _pipe(GradientBoostingRegressor(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=4,
+            min_samples_split=3,
+            min_samples_leaf=2,
+            subsample=0.8,
+            random_state=42
+        )),
+        "Random Forest": _pipe(RandomForestRegressor(
+            n_estimators=500,
+            max_depth=6,
+            min_samples_split=3,
+            min_samples_leaf=2,
+            max_features="sqrt",
+            random_state=42,
+            n_jobs=-1
+        )),
+        "Ridge Regression": _pipe(Ridge(alpha=10.0)),
     }
-    rows = [{"Model":n,**_cv(p,X,y,cv)} for n,p in cands.items()]
+    
+    rows = [{"Model":n,**_cv(p,X_enhanced,y,cv)} for n,p in cands.items()]
     comp = pd.DataFrame(rows)
     best_name = comp.loc[comp["mae_mean"].idxmin(),"Model"]
     best_pipe = cands[best_name]
-    best_pipe.fit(X,y)
+    best_pipe.fit(X_enhanced,y)
     
     # Fit model terbaik pada training data dan evaluate pada test data
     best_pipe.fit(X_train, y_train)
     y_pred_test = best_pipe.predict(X_test)
     
-    rf = cands["Random Forest"]; rf.fit(X,y)
-    fi = pd.DataFrame({"Feature":feats,
-                       "Label":[FEATURE_LABELS.get(f,f) for f in feats],
+    rf = cands["Random Forest"]; rf.fit(X_enhanced,y)
+    fi = pd.DataFrame({"Feature":X_enhanced.columns,
+                       "Label":[FEATURE_LABELS.get(f,f) for f in X_enhanced.columns],
                        "Importance":rf.named_steps["mdl"].feature_importances_
                        }).sort_values("Importance",ascending=False).reset_index(drop=True)
     return {"best_model":best_pipe,"best_name":best_name,"comparison":comp,
-            "feature_imp":fi,"X":X,"y":y,"imputer":imp,"features_used":feats,
+            "feature_imp":fi,"X":X_enhanced,"y":y,"imputer":imp,"features_used":list(X_enhanced.columns),
             "harvest_df":hdf,
             "high_yield_threshold":float(np.percentile(y,75)),
             "low_yield_threshold": float(np.percentile(y,25)),
