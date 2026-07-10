@@ -798,7 +798,7 @@ elif nav == "🔮  Prediksi Panen":
                     color=residuals,
                     colorscale="RdYlGn_r",
                     showscale=True,
-                    colorbar=dict(title="Error (kg)", titleside="right"),
+                    colorbar=dict(title="Error (kg)"),
                     line=dict(color="#0D2015", width=1),
                 ),
                 name="Data Point",
