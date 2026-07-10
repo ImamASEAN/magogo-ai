@@ -100,6 +100,11 @@ def train_models(df):
     imp   = SimpleImputer(strategy="median")
     X     = pd.DataFrame(imp.fit_transform(hdf[feats]), columns=feats)
     y     = hdf["Harvest_Mass"].values
+    
+    # Split data untuk evaluasi (80% train, 20% test)
+    from sklearn.model_selection import train_test_split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
     cv    = KFold(n_splits=5, shuffle=True, random_state=42)
     cands = {
         "Random Forest":    _pipe(RandomForestRegressor(n_estimators=300,max_features="sqrt",random_state=42,n_jobs=-1)),
@@ -111,6 +116,11 @@ def train_models(df):
     best_name = comp.loc[comp["mae_mean"].idxmin(),"Model"]
     best_pipe = cands[best_name]
     best_pipe.fit(X,y)
+    
+    # Fit model terbaik pada training data dan evaluate pada test data
+    best_pipe.fit(X_train, y_train)
+    y_pred_test = best_pipe.predict(X_test)
+    
     rf = cands["Random Forest"]; rf.fit(X,y)
     fi = pd.DataFrame({"Feature":feats,
                        "Label":[FEATURE_LABELS.get(f,f) for f in feats],
@@ -121,7 +131,9 @@ def train_models(df):
             "harvest_df":hdf,
             "high_yield_threshold":float(np.percentile(y,75)),
             "low_yield_threshold": float(np.percentile(y,25)),
-            "median_yield":        float(np.median(y))}
+            "median_yield":        float(np.median(y)),
+            "y_test": y_test,
+            "y_pred_test": y_pred_test}
 
 def predict_single(bundle, user_inputs):
     feats = bundle["features_used"]
