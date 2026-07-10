@@ -6,17 +6,44 @@ from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 
-# Nama fitur dasar (sesuai input user)
+# Nama fitur dasar (sesuai input user di app.py)
 BASE_FEATURES = [
     'Feed_Amount', 'Bulking_Agent', 'Water_Added', 'pH_Substrate',
     'Ambient_Temp', 'Reactor_Temp', 'Day_Cycle', 'Frass_Collected'
 ]
 
-# Nama fitur lengkap setelah engineering (sesuai model yang dilatih)
+# Nama fitur lengkap setelah engineering (harus sama persis dengan saat training)
 ALL_FEATURES = BASE_FEATURES + [
     'Feed_Temp_Ratio', 'Feed_Water_Interact', 'Moisture_Index', 
     'Feed_Squared', 'Temp_Squared', 'Density_Proxy'
 ]
+
+def create_features(df):
+    """
+    Fungsi untuk membuat fitur tambahan (Feature Engineering).
+    Logika ini HARUS sama persis antara saat training dan prediction.
+    """
+    df = df.copy()
+    
+    # 1. Rasio Pakan terhadap Suhu (Efisiensi konversi termal)
+    # Tambah epsilon kecil untuk menghindari pembagian dengan nol
+    df['Feed_Temp_Ratio'] = df['Feed_Amount'] / (df['Reactor_Temp'] + 1e-6)
+    
+    # 2. Interaksi Pakan dan Air (Kelembaban substrat efektif)
+    df['Feed_Water_Interact'] = df['Feed_Amount'] * df['Water_Added']
+    
+    # 3. Indeks Kelembaban (Water vs Total Massa Padat)
+    total_solid = df['Feed_Amount'] + df['Bulking_Agent'] + 1e-6
+    df['Moisture_Index'] = df['Water_Added'] / total_solid
+    
+    # 4. Fitur Kuadratik (Untuk menangkap pola non-linear)
+    df['Feed_Squared'] = df['Feed_Amount'] ** 2
+    df['Temp_Squared'] = df['Reactor_Temp'] ** 2
+    
+    # 5. Proksi Kepadatan Larva (Frass per hari)
+    df['Density_Proxy'] = df['Frass_Collected'] / (df['Day_Cycle'] + 1e-6)
+    
+    return df
 
 def train_model(df):
     """
@@ -50,7 +77,7 @@ def train_model(df):
     
     model.fit(X_imputed, y)
 
-    # Evaluasi sederhana pada data latih (karena data sedikit, kita lihat R² saja)
+    # Evaluasi sederhana pada data latih
     preds = model.predict(X_imputed)
     r2 = r2_score(y, preds)
     mae = mean_absolute_error(y, preds)
@@ -66,33 +93,6 @@ def train_model(df):
     }
     
     return bundle
-
-def create_features(df):
-    """
-    Fungsi untuk membuat fitur tambahan (Feature Engineering).
-    Harus sama persis antara saat training dan prediction.
-    """
-    df = df.copy()
-    
-    # 1. Rasio Pakan terhadap Suhu (Efisiensi konversi termal)
-    # Tambah epsilon kecil untuk menghindari pembagian dengan nol
-    df['Feed_Temp_Ratio'] = df['Feed_Amount'] / (df['Reactor_Temp'] + 1e-6)
-    
-    # 2. Interaksi Pakan dan Air (Kelembaban substrat efektif)
-    df['Feed_Water_Interact'] = df['Feed_Amount'] * df['Water_Added']
-    
-    # 3. Indeks Kelembaban (Water vs Total Massa Padat)
-    total_solid = df['Feed_Amount'] + df['Bulking_Agent'] + 1e-6
-    df['Moisture_Index'] = df['Water_Added'] / total_solid
-    
-    # 4. Fitur Kuadratik (Untuk menangkap pola non-linear)
-    df['Feed_Squared'] = df['Feed_Amount'] ** 2
-    df['Temp_Squared'] = df['Reactor_Temp'] ** 2
-    
-    # 5. Proksi Kepadatan Larva (Frass per hari)
-    df['Density_Proxy'] = df['Frass_Collected'] / (df['Day_Cycle'] + 1e-6)
-    
-    return df
 
 def predict_single(bundle, input_dict):
     """
@@ -111,7 +111,7 @@ def predict_single(bundle, input_dict):
     row_eng = create_features(row)
     
     # 3. Pastikan urutan kolom sesuai dengan yang diharapkan model (ALL_FEATURES)
-    # Jika ada kolom yang hilang (misal karena error logika), diisi NaN dulu
+    # Jika ada kolom yang hilang, diisi NaN dulu
     for col in expected_features:
         if col not in row_eng.columns:
             row_eng[col] = np.nan
