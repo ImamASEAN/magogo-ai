@@ -819,7 +819,7 @@ elif nav == "🔮  Prediksi Panen":
             ))
             
             fig_scatter.update_layout(
-                title=dict(text="Actual vs Predicted Harvest Mass", font=dict(color="#0D2015", size=14)),
+                title=dict(text="Actual vs Predicted Harvest Mass"),
                 height=500,
                 plot_bgcolor="#ffffff",
                 paper_bgcolor="#F2F7F4",
@@ -829,13 +829,13 @@ elif nav == "🔮  Prediksi Panen":
                     title="Nilai Aktual (kg)",
                     gridcolor="#EAF4EE",
                     tickfont=dict(color="#4A7C59"),
-                    titlefont=dict(color="#0D2015", size=12),
+                    title_font=dict(color="#0D2015", size=12),
                 ),
                 yaxis=dict(
                     title="Nilai Prediksi AI (kg)",
                     gridcolor="#EAF4EE",
                     tickfont=dict(color="#4A7C59"),
-                    titlefont=dict(color="#0D2015", size=12),
+                    title_font=dict(color="#0D2015", size=12),
                 ),
                 showlegend=True,
             )
