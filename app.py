@@ -909,7 +909,7 @@ elif nav == "🔮  Prediksi Panen":
                     "Prediksi (kg)": "{:.2f}",
                     "Selisih (kg)": "{:+.2f}",
                     "Error Absolut (%)": "{:.1f}%"
-                ),
+                }),
                 use_container_width=True,
                 height=400,
             )
