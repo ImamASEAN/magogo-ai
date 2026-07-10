@@ -909,8 +909,6 @@ elif nav == "🔮  Prediksi Panen":
                     "Prediksi (kg)": "{:.2f}",
                     "Selisih (kg)": "{:+.2f}",
                     "Error Absolut (%)": "{:.1f}%"
-                }).background_gradient(
-                    cmap="RdYlGn_r", subset=["Selisih (kg)"], vmin=-5, vmax=5
                 ),
                 use_container_width=True,
                 height=400,
