@@ -772,6 +772,160 @@ elif nav == "🔮  Prediksi Panen":
         cb.metric("Potensi Setelah Perbaikan", f"{imp_pred:.2f} kg", delta=f"{gain_kg:+.2f} kg")
         cc.metric("Estimasi Peningkatan",  f"{gain_kg:+.2f} kg", delta=f"{(gain_kg/pred*100):+.1f}%")
 
+        # ── Visualisasi Akurasi Model ──────────────────────────────────────────
+        st.markdown("---")
+        st.markdown('<div class="sec-hdr">📊 Evaluasi Akurasi Model: Prediksi vs Data Aktual</div>')
+        st.markdown('<div class="info">Visualisasi ini menunjukkan seberapa dekat prediksi model dengan data panen sebenarnya. Titik yang dekat dengan garis merah = prediksi akurat.</div>', unsafe_allow_html=True)
+
+        # Ambil data aktual dan prediksi dari bundle
+        y_actual = bundle["y_test"]
+        y_pred = bundle["y_pred_test"]
+        
+        # Hitung residual
+        residuals = y_actual - y_pred
+        
+        # Tab untuk berbagai visualisasi
+        tab1, tab2, tab3 = st.tabs(["📈 Scatter Plot", "📉 Tren Waktu", "📋 Detail Error"])
+        
+        with tab1:
+            # Scatter plot Actual vs Predicted
+            fig_scatter = go.Figure()
+            fig_scatter.add_trace(go.Scatter(
+                x=y_actual, y=y_pred,
+                mode="markers",
+                marker=dict(
+                    size=10,
+                    color=residuals,
+                    colorscale="RdYlGn_r",
+                    showscale=True,
+                    colorbar=dict(title="Error (kg)", titleside="right"),
+                    line=dict(color="#0D2015", width=1),
+                ),
+                name="Data Point",
+                text=[f"Aktual: {a:.2f} kg<br>Prediksi: {p:.2f} kg<br>Error: {r:.2f} kg" 
+                      for a, p, r in zip(y_actual, y_pred, residuals)],
+                hovertemplate="%{text}<extra></extra>",
+            ))
+            
+            # Garis diagonal sempurna (prediksi ideal)
+            min_val = min(y_actual.min(), y_pred.min())
+            max_val = max(y_actual.max(), y_pred.max())
+            fig_scatter.add_trace(go.Scatter(
+                x=[min_val, max_val],
+                y=[min_val, max_val],
+                mode="lines",
+                line=dict(color="#D32F2F", width=2, dash="dash"),
+                name="Prediksi Sempurna",
+            ))
+            
+            fig_scatter.update_layout(
+                title=dict(text="Actual vs Predicted Harvest Mass", font=dict(color="#0D2015", size=14)),
+                height=500,
+                plot_bgcolor="#ffffff",
+                paper_bgcolor="#F2F7F4",
+                font=dict(color="#152B1E", family="Inter"),
+                margin=dict(t=50, b=50, l=50, r=50),
+                xaxis=dict(
+                    title="Nilai Aktual (kg)",
+                    gridcolor="#EAF4EE",
+                    tickfont=dict(color="#4A7C59"),
+                    titlefont=dict(color="#0D2015", size=12),
+                ),
+                yaxis=dict(
+                    title="Nilai Prediksi AI (kg)",
+                    gridcolor="#EAF4EE",
+                    tickfont=dict(color="#4A7C59"),
+                    titlefont=dict(color="#0D2015", size=12),
+                ),
+                showlegend=True,
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+        
+        with tab2:
+            # Line chart untuk tren
+            df_compare = pd.DataFrame({
+                "Actual": y_actual,
+                "Predicted": y_pred,
+                "Error": residuals
+            }).reset_index(drop=True)
+            
+            fig_trend = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                                     subplot_titles=("Actual vs Predicted Trend", "Prediction Error"))
+            
+            # Plot actual dan predicted
+            fig_trend.add_trace(go.Scatter(
+                y=df_compare["Actual"],
+                mode="lines+markers",
+                line=dict(color="#0D2015", width=2),
+                marker=dict(size=6),
+                name="Aktual",
+            ), row=1, col=1)
+            
+            fig_trend.add_trace(go.Scatter(
+                y=df_compare["Predicted"],
+                mode="lines+markers",
+                line=dict(color="#52B788", width=2, dash="dot"),
+                marker=dict(size=6),
+                name="Prediksi AI",
+            ), row=1, col=1)
+            
+            # Plot error
+            fig_trend.add_trace(go.Bar(
+                y=df_compare["Error"],
+                marker_color=["#D32F2F" if e > 0 else "#2D6A4F" for e in df_compare["Error"]],
+                name="Error (Aktual - Prediksi)",
+                opacity=0.7,
+            ), row=2, col=1)
+            
+            fig_trend.update_layout(
+                height=600,
+                plot_bgcolor="#ffffff",
+                paper_bgcolor="#F2F7F4",
+                font=dict(color="#152B1E", family="Inter"),
+                margin=dict(t=60, b=40, l=50, r=30),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            
+            fig_trend.update_xaxes(title_text="Sampel Data", gridcolor="#EAF4EE", tickfont=dict(color="#4A7C59"))
+            fig_trend.update_yaxes(title_text="Harvest Mass (kg)", gridcolor="#EAF4EE", tickfont=dict(color="#4A7C59"), row=1, col=1)
+            fig_trend.update_yaxes(title_text="Error (kg)", gridcolor="#EAF4EE", tickfont=dict(color="#4A7C59"), row=2, col=1)
+            
+            st.plotly_chart(fig_trend, use_container_width=True)
+        
+        with tab3:
+            # Tabel detail
+            df_table = pd.DataFrame({
+                "No.": range(1, len(y_actual) + 1),
+                "Aktual (kg)": y_actual.round(2),
+                "Prediksi (kg)": y_pred.round(2),
+                "Selisih (kg)": residuals.round(2),
+                "Error Absolut (%)": (abs(residuals) / y_actual * 100).round(1)
+            })
+            
+            st.dataframe(
+                df_table.style.format({
+                    "Aktual (kg)": "{:.2f}",
+                    "Prediksi (kg)": "{:.2f}",
+                    "Selisih (kg)": "{:+.2f}",
+                    "Error Absolut (%)": "{:.1f}%"
+                }).background_gradient(
+                    cmap="RdYlGn_r", subset=["Selisih (kg)"], vmin=-5, vmax=5
+                ),
+                use_container_width=True,
+                height=400,
+            )
+            
+            # Summary statistics
+            st.markdown('<div class="card-green" style="margin-top:16px;">', unsafe_allow_html=True)
+            st.markdown("**Statistik Error:**", unsafe_allow_html=True)
+            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+            col_s1.metric("MAE (Mean Absolute Error)", f"{abs(residuals).mean():.2f} kg")
+            col_s2.metric("RMSE (Root Mean Square Error)", f"{np.sqrt((residuals**2).mean()):.2f} kg")
+            col_s3.metric("Max Over-Predict", f"{residuals[residuals < 0].min():.2f} kg" if len(residuals[residuals < 0]) > 0 else "N/A")
+            col_s4.metric("Max Under-Predict", f"{residuals[residuals > 0].max():.2f} kg" if len(residuals[residuals > 0]) > 0 else "N/A")
+            st.markdown('</div>', unsafe_allow_html=True)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  KONDISI OPTIMAL
